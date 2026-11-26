@@ -22,7 +22,7 @@ already read on your phone is the cheapest guard there is.
 
 - Only presses and replies from `AA_OWNER_ID` count; anyone else in the chat is ignored.
 - Each button carries a random per-item token: old messages and replays cannot approve a new draft.
-- Approval is bound to the SHA-256 of the draft. If the file changes after you approved it,
+- Approval is bound to the SHA-256 of the draft (shown in full under the title). If the file changes after you approved it,
   `wait` refuses with an error instead of returning it.
 - The bot token is read from the environment only and never printed, even in HTTP errors.
 - State is plain JSON files with mode `0600` in `~/.local/state/agent-approve`.
@@ -56,11 +56,13 @@ WantedBy=default.target
 
 ```sh
 id=$(agent-approve ask --title "Reply to octo/repo#12" --file reply.md)
-case $(agent-approve wait "$id" --timeout 7200 > out.txt; echo $?) in
-  0) gh pr comment 12 -R octo/repo --body-file "$(cat out.txt)" && agent-approve mark "$id" done ;;
-  3) echo "Owner asked for changes: $(cat out.txt)" ;;   # rewrite and ask again
+result=$(agent-approve wait "$id" --timeout 7200); code=$?
+case $code in
+  0) gh pr comment 12 -R octo/repo --body-file "$result" && agent-approve mark "$id" done ;;  # $result is the frozen file
+  3) echo "Owner asked for changes: $result" ;;   # rewrite and ask again
   4) echo "Rejected" ;;
   5) echo "No answer yet" ;;
+  *) echo "agent-approve failed" >&2 ;;              # errors go to stderr; publish nothing
 esac
 ```
 
@@ -75,8 +77,8 @@ Tell your agent the rule in its instructions file, for example in `CLAUDE.md` or
 
 ## Limits
 
-- One owner per state directory. Run a second copy with another `AA_STATE_DIR` for another person.
-- Drafts over 3,500 characters are sent as a text file, not inline.
+- One owner and one `serve` per state directory (a second `serve` refuses to start). Use another `AA_STATE_DIR` for another person.
+- Drafts over 3,500 characters, or with invisible characters, are sent as a text file: open it before you press Approve.
 - `serve` must be running for presses to be recorded; presses made while it is down are picked up
   when it starts again (Telegram keeps updates for 24 hours).
 

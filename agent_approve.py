@@ -10,7 +10,7 @@ Exit codes of `wait`: 0 approved, 3 redo (feedback on stdout), 4 rejected, 5 tim
 Only presses and replies from AA_OWNER_ID count. The approved text is frozen: `wait`
 prints the path of the exact bytes the owner saw, so the agent cannot publish a newer draft.
 """
-import argparse, hashlib, html, json, os, secrets, sys, time, unicodedata, urllib.error, urllib.parse, urllib.request
+import argparse, fcntl, hashlib, html, json, os, secrets, sys, time, unicodedata, urllib.error, urllib.parse, urllib.request
 
 LIMIT = 3500  # Telegram allows 4096 characters; longer drafts go as a file
 EXIT = {"approved": 0, "redo": 3, "rejected": 4}
@@ -96,7 +96,8 @@ def ask(bot, store, chat, title, draft):
     item = {"id": secrets.token_hex(4), "token": secrets.token_hex(4), "title": title, "status": "pending",
             "sha256": hashlib.sha256(draft).hexdigest(), "created": int(time.time()), "feedback": ""}
     store.write(store.path(item["id"], "draft"), draft)
-    head = f"<b>{html.escape(title)}</b>\n<code>{item['id']}</code> · sha256 {item['sha256'][:12]}"
+    store.save(item)  # before sending: a press can arrive before sendMessage returns
+    head = f"<b>{html.escape(title)}</b>\n<code>{item['id']}</code>\nsha256 <code>{item['sha256']}</code>"
     text = draft.decode("utf-8")  # strict: the owner must see the same bytes that get published
     marks = hidden(text)
     if marks:
@@ -125,7 +126,7 @@ def handle(bot, store, owner, update):
         except (ValueError, OSError):
             bot.call("answerCallbackQuery", callback_query_id=q["id"], text="Unknown item")
             return None
-        if token != item["token"] or item["status"] != "pending":
+        if action not in ("ok", "redo", "no") or token != item["token"] or item["status"] != "pending":
             bot.call("answerCallbackQuery", callback_query_id=q["id"], text="Already decided")
             return None
         chat = q["message"]["chat"]["id"]
@@ -156,11 +157,17 @@ def handle(bot, store, owner, update):
 
 
 def serve(bot, store, owner, once=False):
+    lock = open(os.path.join(store.root, "serve.lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit("agent-approve: another serve is already running for this state directory")
     offset_file = os.path.join(store.root, "offset")
     try:
         offset = int(open(offset_file).read())
     except (OSError, ValueError):
         offset = 0
+    tries = {}
     while True:
         try:
             updates = bot.call("getUpdates", offset=offset, timeout=0 if once else 50,
@@ -170,12 +177,23 @@ def serve(bot, store, owner, once=False):
             time.sleep(5)
             continue
         for u in updates:
-            offset = u["update_id"] + 1
-            store.write(offset_file, str(offset).encode())  # a bad update is never replayed after a restart
             try:
                 handle(bot, store, owner, u)
-            except Exception as e:  # one bad update must not stop the bot
-                print(f"agent-approve: update {u.get('update_id')}: {type(e).__name__}: {e}", file=sys.stderr)
+            except (RuntimeError, OSError) as e:
+                # Telegram or disk trouble: keep the update and try it again, so a press is not lost;
+                # after 5 tries it is skipped (Telegram rejects very old button presses for good)
+                tries[u["update_id"]] = tries.get(u["update_id"], 0) + 1
+                if tries[u["update_id"]] < 5:
+                    print(f"agent-approve: update {u.get('update_id')} will be retried: {e}", file=sys.stderr)
+                    if once:
+                        return
+                    time.sleep(5)
+                    break
+                print(f"agent-approve: update {u.get('update_id')} skipped after 5 tries: {e}", file=sys.stderr)
+            except Exception as e:  # malformed update: skip it, one bad update must not stop the bot
+                print(f"agent-approve: update {u.get('update_id')} skipped: {type(e).__name__}: {e}", file=sys.stderr)
+            offset = u["update_id"] + 1
+            store.write(offset_file, str(offset).encode())
         if once:
             return
 

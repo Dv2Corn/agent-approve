@@ -97,6 +97,37 @@ class AgentApproveTest(unittest.TestCase):
         aa.serve(Once(), self.store, OWNER, once=True)
         self.assertEqual(open(os.path.join(self.dir, "offset")).read(), "9")
 
+    def test_unknown_action_is_refused(self):
+        self.assertIsNone(aa.handle(self.bot, self.store, OWNER, press(self.item, "hack")))
+        self.assertEqual(self.store.load(self.id)["status"], "pending")
+
+    def test_item_is_saved_before_the_message_is_sent(self):
+        store = self.store
+        class Peek(FakeBot):
+            def call(self, method, files=None, **params):
+                if method == "sendMessage":
+                    self.seen = [i["id"] for i in store.all()]
+                return super().call(method, files, **params)
+        bot = Peek()
+        new = aa.ask(bot, store, "1", "t", b"x")
+        self.assertIn(new, bot.seen)
+
+    def test_transient_error_keeps_the_update_for_retry(self):
+        class Flaky(FakeBot):
+            def call(self, method, files=None, **params):
+                if method == "getUpdates":
+                    return [{"update_id": 20, "callback_query": {"id": "q", "from": {"id": int(OWNER)}, "message": {"chat": {"id": 1}}, "data": "redo:x:y"}}]
+                raise RuntimeError("Telegram answerCallbackQuery: HTTP 502")
+        aa.serve(Flaky(), self.store, OWNER, once=True)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "offset")))
+
+    def test_second_serve_is_refused(self):
+        lock = open(os.path.join(self.dir, "serve.lock"), "w")
+        import fcntl
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with self.assertRaises(SystemExit):
+            aa.serve(FakeBot(), self.store, OWNER, once=True)
+
     def test_bad_ids_are_refused(self):
         with self.assertRaises(ValueError):
             self.store.path("../etc")
