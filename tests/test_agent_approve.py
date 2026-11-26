@@ -74,6 +74,26 @@ class AgentApproveTest(unittest.TestCase):
         self.assertEqual(aa.wait(self.store, self.id, 0), 3)
         self.assertEqual(self.store.load(self.id)["feedback"], "shorter please")
 
+    def test_hidden_characters_force_a_file_with_warning(self):
+        bot = FakeBot()
+        aa.ask(bot, self.store, "1", "t", "pay \u202eevil".encode())
+        method, files, params = bot.calls[0]
+        self.assertEqual(method, "sendDocument")
+        self.assertIn("U+202E", params["caption"])
+
+    def test_invalid_utf8_is_refused(self):
+        with self.assertRaises(UnicodeDecodeError):
+            aa.ask(FakeBot(), self.store, "1", "t", b"\xff\xfe")
+
+    def test_bad_update_is_skipped_and_offset_saved(self):
+        class Once(FakeBot):
+            def call(self, method, files=None, **params):
+                if method == "getUpdates":
+                    return [{"update_id": 7, "callback_query": {"id": "q", "from": {"id": int(OWNER)}}}, {"update_id": 8}]
+                return super().call(method, files, **params)
+        aa.serve(Once(), self.store, OWNER, once=True)
+        self.assertEqual(open(os.path.join(self.dir, "offset")).read(), "9")
+
     def test_bad_ids_are_refused(self):
         with self.assertRaises(ValueError):
             self.store.path("../etc")

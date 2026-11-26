@@ -10,10 +10,15 @@ Exit codes of `wait`: 0 approved, 3 redo (feedback on stdout), 4 rejected, 5 tim
 Only presses and replies from AA_OWNER_ID count. The approved text is frozen: `wait`
 prints the path of the exact bytes the owner saw, so the agent cannot publish a newer draft.
 """
-import argparse, hashlib, html, json, os, secrets, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse, hashlib, html, json, os, secrets, sys, time, unicodedata, urllib.error, urllib.parse, urllib.request
 
 LIMIT = 3500  # Telegram allows 4096 characters; longer drafts go as a file
 EXIT = {"approved": 0, "redo": 3, "rejected": 4}
+
+
+def hidden(text):
+    """Characters a chat shows differently or not at all: controls, bidi overrides, zero-width marks."""
+    return sorted({f"U+{ord(c):04X}" for c in text if c not in "\n\t" and unicodedata.category(c) in ("Cc", "Cf", "Co", "Cs")})
 
 
 def env(name, default=None):
@@ -89,8 +94,11 @@ def ask(bot, store, chat, title, draft):
             "sha256": hashlib.sha256(draft).hexdigest(), "created": int(time.time()), "feedback": ""}
     store.write(store.path(item["id"], "draft"), draft)
     head = f"<b>{html.escape(title)}</b>\n<code>{item['id']}</code> · sha256 {item['sha256'][:12]}"
-    text = draft.decode("utf-8", "replace")
-    if len(text) <= LIMIT:
+    text = draft.decode("utf-8")  # strict: the owner must see the same bytes that get published
+    marks = hidden(text)
+    if marks:
+        head += "\n⚠️ <b>Hidden characters:</b> " + ", ".join(marks[:10]) + " (sent as a file, open it to check)"
+    if len(text) <= LIMIT and not marks:
         msg = bot.call("sendMessage", chat_id=chat, parse_mode="HTML", reply_markup=buttons(item),
                        text=f"{head}\n\n<pre>{html.escape(text)}</pre>")
     else:
@@ -145,7 +153,11 @@ def handle(bot, store, owner, update):
 
 
 def serve(bot, store, owner, once=False):
-    offset = 0
+    offset_file = os.path.join(store.root, "offset")
+    try:
+        offset = int(open(offset_file).read())
+    except (OSError, ValueError):
+        offset = 0
     while True:
         try:
             updates = bot.call("getUpdates", offset=offset, timeout=0 if once else 50,
@@ -156,7 +168,11 @@ def serve(bot, store, owner, once=False):
             continue
         for u in updates:
             offset = u["update_id"] + 1
-            handle(bot, store, owner, u)
+            store.write(offset_file, str(offset).encode())  # a bad update is never replayed after a restart
+            try:
+                handle(bot, store, owner, u)
+            except Exception as e:  # one bad update must not stop the bot
+                print(f"agent-approve: update {u.get('update_id')}: {type(e).__name__}: {e}", file=sys.stderr)
         if once:
             return
 
@@ -205,6 +221,10 @@ def main(argv=None):
         draft = open(args.file, "rb").read() if args.file else sys.stdin.buffer.read()
         if not draft.strip():
             sys.exit("agent-approve: empty draft")
+        try:
+            draft.decode("utf-8")
+        except UnicodeDecodeError:
+            sys.exit("agent-approve: draft is not valid UTF-8")
         print(ask(bot, store, chat, args.title, draft))
     elif args.cmd == "serve":
         serve(bot, store, env("AA_OWNER_ID"))
