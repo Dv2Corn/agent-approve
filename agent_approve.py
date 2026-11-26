@@ -18,7 +18,10 @@ EXIT = {"approved": 0, "redo": 3, "rejected": 4}
 
 def hidden(text):
     """Characters a chat shows differently or not at all: controls, bidi overrides, zero-width marks."""
-    return sorted({f"U+{ord(c):04X}" for c in text if c not in "\n\t" and unicodedata.category(c) in ("Cc", "Cf", "Co", "Cs")})
+    return sorted({f"U+{ord(c):04X}" for c in text if c not in "\n\t " and (
+        unicodedata.category(c) in ("Cc", "Cf", "Co", "Cs", "Cn", "Zs", "Zl", "Zp")
+        or 0xFE00 <= ord(c) <= 0xFE0F or 0xE0100 <= ord(c) <= 0xE01EF  # variation selectors
+        or c in "\u115f\u1160\u3164\uffa0\u2800")})  # blank-looking letters
 
 
 def env(name, default=None):

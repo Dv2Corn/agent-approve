@@ -80,6 +80,9 @@ class AgentApproveTest(unittest.TestCase):
         method, files, params = bot.calls[0]
         self.assertEqual(method, "sendDocument")
         self.assertIn("U+202E", params["caption"])
+        for sneaky in ("\u00a0", "\u3164", "\ufe0f", "\u2028"):
+            self.assertTrue(aa.hidden("a" + sneaky), sneaky)
+        self.assertFalse(aa.hidden("Привет, мир! café 🙂\n\tok"))
 
     def test_invalid_utf8_is_refused(self):
         with self.assertRaises(UnicodeDecodeError):
